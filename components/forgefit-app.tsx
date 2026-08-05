@@ -11,9 +11,34 @@ type Tab = "inicio" | "entrenos" | "calendario" | "ejercicios" | "progreso" | "m
 const muscles: MuscleGroup[] = ["Pecho", "Espalda", "Pierna", "Hombro", "Bíceps", "Tríceps", "Core", "Glúteo", "Otro"];
 const loads: LoadType[] = ["Barra · peso total", "Mancuernas · cada una", "Máquina/polea · peso seleccionado", "Dominada asistida · kg de asistencia", "Dominada asistida · tipo de goma", "Sin peso · solo repeticiones"];
 const uid = () => crypto.randomUUID(); const today = () => new Date().toISOString().slice(0, 10);
-const selectAll = (e: React.FocusEvent<HTMLInputElement>) => requestAnimationFrame(() => e.currentTarget.select());
+const selectAll = (e: React.FocusEvent<HTMLInputElement>) => { const el = e.currentTarget; requestAnimationFrame(() => el.select()); };
 const selectAllOnClick = (e: React.MouseEvent<HTMLInputElement>) => { e.preventDefault(); e.currentTarget.select(); };
 function Spinner({ size = 16 }: { size?: number }) { return <span className="spinner" style={{ width: size, height: size }} />; }
+
+function WeightInput({ value, disabled, onChange }: { value: number; disabled: boolean; onChange: (v: number) => void }) {
+    const [text, setText] = useState(String(value));
+    useEffect(() => { if (Number(text.replace(",", ".")) !== value) setText(String(value)); }, [value]);
+    return (
+        <input
+            className="field"
+            type="text"
+            inputMode="decimal"
+            pattern="[0-9]*[.,]?[0-9]*"
+            value={text}
+            disabled={disabled}
+            onFocus={selectAll}
+            onMouseUp={selectAllOnClick}
+            onChange={e => {
+                const raw = e.target.value;
+                const normalized = raw.replace(",", ".");
+                if (raw === "" || /^\d*\.?\d*$/.test(normalized)) {
+                    setText(raw);
+                    onChange(normalized === "" ? 0 : Number(normalized));
+                }
+            }}
+        />
+    );
+}
 
 function demoData() {
     const ex = (name: string, muscle_group: MuscleGroup, load_type: LoadType, notes = "", uses_bands = false): Exercise => ({ id: uid(), name, muscle_group, load_type, notes, uses_bands });
@@ -352,7 +377,7 @@ function WorkoutDetail({
                         {ex.workout_sets.map((s, i) => (
                             <div key={s.id} className={`setrow ${s.is_completed ? "done" : ""}`}>
                                 <b>{i + 1}</b>
-                                {ex.uses_bands ? <div><label className="label">Gomas</label><div className="row" style={{ gap: 6 }}><button type="button" aria-label="Menos gomas" className="button secondary small" disabled={w.is_completed || s.band_count <= 0} onClick={() => onSet(w.id, ex.id, s.id, { band_count: Math.max(0, s.band_count - 1) })}>−</button><b style={{ minWidth: 14, textAlign: "center" }}>{s.band_count}</b><button type="button" aria-label="Más gomas" className="button secondary small" disabled={w.is_completed || s.band_count >= 3} onClick={() => onSet(w.id, ex.id, s.id, { band_count: Math.min(3, s.band_count + 1) })}>+</button></div></div> : <div><label className="label">Peso</label><input className="field" type="number" step="0.5" value={s.weight} disabled={w.is_completed} onFocus={selectAll} onMouseUp={selectAllOnClick} onChange={e => onSet(w.id, ex.id, s.id, { weight: Number(e.target.value) })} /></div>}
+                                {ex.uses_bands ? <div><label className="label">Gomas</label><div className="row" style={{ gap: 6 }}><button type="button" aria-label="Menos gomas" className="button secondary small" disabled={w.is_completed || s.band_count <= 0} onClick={() => onSet(w.id, ex.id, s.id, { band_count: Math.max(0, s.band_count - 1) })}>−</button><b style={{ minWidth: 14, textAlign: "center" }}>{s.band_count}</b><button type="button" aria-label="Más gomas" className="button secondary small" disabled={w.is_completed || s.band_count >= 3} onClick={() => onSet(w.id, ex.id, s.id, { band_count: Math.min(3, s.band_count + 1) })}>+</button></div></div> : <div><label className="label">Peso</label><WeightInput value={s.weight} disabled={w.is_completed} onChange={weight => onSet(w.id, ex.id, s.id, { weight })} /></div>}
                                 <div><label className="label">Reps</label><input className="field" type="number" value={s.repetitions} disabled={w.is_completed} onFocus={selectAll} onMouseUp={selectAllOnClick} onChange={e => onSet(w.id, ex.id, s.id, { repetitions: Number(e.target.value) })} /></div>
                                 <button aria-label="Completar serie" disabled={w.is_completed} className={`button ${s.is_completed ? "secondary" : ""}`} onClick={() => onSet(w.id, ex.id, s.id, { is_completed: !s.is_completed })}>{s.is_completed ? <Check size={19} /> : "○"}</button>
                                 {!w.is_completed && <button aria-label="Eliminar serie" className="button danger" disabled={busy} onClick={() => onRemoveSet(ex.id, s.id)}><Trash2 size={15} /></button>}
@@ -370,7 +395,7 @@ function WorkoutDetail({
 
 function Calendar({ workouts }: { workouts: Workout[] }) { const [cursor, setCursor] = useState(new Date()); const y = cursor.getFullYear(), m = cursor.getMonth(), first = new Date(y, m, 1), offset = (first.getDay() + 6) % 7, days = new Date(y, m + 1, 0).getDate(); return <div className="card"><div className="row between"><button className="button secondary" onClick={() => setCursor(new Date(y, m - 1, 1))}>←</button><h2>{cursor.toLocaleDateString("es-ES", { month: "long", year: "numeric" })}</h2><button className="button secondary" onClick={() => setCursor(new Date(y, m + 1, 1))}>→</button></div><div className="calendar">{["L", "M", "X", "J", "V", "S", "D"].map(x => <b className="muted" key={x}>{x}</b>)}{Array.from({ length: offset }).map((_, i) => <div key={`e${i}`} />)}{Array.from({ length: days }, (_, i) => i + 1).map(d => { const ws = workouts.filter(w => { const x = new Date(w.date); return x.getFullYear() === y && x.getMonth() === m && x.getDate() === d }); return <div className="day" key={d}><b>{d}</b>{ws.map(w => <div key={w.id} title={w.title} style={{ marginTop: 5 }}><span className="dot" style={{ background: groupColor[workoutGroup(w)] }} />{w.title}</div>)}</div> })}</div></div> }
 
-function Exercises({ exercises, workouts, onNew, onEdit }: { exercises: Exercise[]; workouts: Workout[]; onNew: () => void; onEdit: (exercise: Exercise) => void }) { const [q, setQ] = useState(""); const filtered = exercises.filter(e => (e.name + e.muscle_group).toLowerCase().includes(q.toLowerCase())); return <div className="stack"><div className="row between"><h2>Biblioteca de ejercicios</h2><button className="button" onClick={onNew}><Plus size={16} /> Añadir</button></div><div className="row"><Search size={18} /><input className="field" placeholder="Buscar ejercicio…" value={q} onChange={e => setQ(e.target.value)} /></div><div className="grid grid2">{filtered.map(e => { const sets = workouts.flatMap(w => w.workout_exercises.filter(x => x.name === e.name).flatMap(x => x.workout_sets.filter(s => s.is_completed))); const max = Math.max(0, ...sets.map(s => s.weight)); const minBands = e.uses_bands && sets.length ? Math.min(...sets.map(s => s.band_count)) : null; const orm = Math.max(0, ...sets.map(s => oneRM(s.weight, s.repetitions))); return <div className="card" key={e.id}><div className="row between"><div className="exerciseHeader" style={{ borderColor: groupColor[e.muscle_group] }}><h3>{e.name}</h3><span className="muted">{e.muscle_group}</span></div><div className="row"><span className="badge">{e.uses_bands ? (minBands !== null ? `${minBands} goma${minBands === 1 ? "" : "s"} (mejor)` : "Sin marca") : (max ? `${max} kg` : "Sin marca")}</span><button className="button secondary small" onClick={() => onEdit(e)}>Editar</button></div></div>{e.notes && <p>{e.notes}</p>}<div className="muted">{e.uses_bands ? "Progreso: menos gomas = más fuerza" : `1RM estimado: ${orm ? `${orm.toFixed(1)} kg` : "—"}`}</div></div> })}</div></div> }
+function Exercises({ exercises, workouts, onNew, onEdit }: { exercises: Exercise[]; workouts: Workout[]; onNew: () => void; onEdit: (exercise: Exercise) => void }) { const [q, setQ] = useState(""); const filtered = exercises.filter(e => `${e.name} ${e.muscle_group}`.toLowerCase().includes(q.toLowerCase())); return <div className="stack"><div className="row between"><h2>Biblioteca de ejercicios</h2><button className="button" onClick={onNew}><Plus size={16} /> Añadir</button></div><div className="row"><Search size={18} /><input className="field" placeholder="Buscar ejercicio…" value={q} onChange={e => setQ(e.target.value)} /></div><div className="grid grid2">{filtered.map(e => { const sets = workouts.flatMap(w => w.workout_exercises.filter(x => x.name === e.name).flatMap(x => x.workout_sets.filter(s => s.is_completed))); const max = Math.max(0, ...sets.map(s => s.weight)); const minBands = e.uses_bands && sets.length ? Math.min(...sets.map(s => s.band_count)) : null; const orm = Math.max(0, ...sets.map(s => oneRM(s.weight, s.repetitions))); return <div className="card" key={e.id}><div className="row between"><div className="exerciseHeader" style={{ borderColor: groupColor[e.muscle_group] }}><h3>{e.name}</h3><span className="muted">{e.muscle_group}</span></div><div className="row"><span className="badge">{e.uses_bands ? (minBands !== null ? `${minBands} goma${minBands === 1 ? "" : "s"} (mejor)` : "Sin marca") : (max ? `${max} kg` : "Sin marca")}</span><button className="button secondary small" onClick={() => onEdit(e)}>Editar</button></div></div>{e.notes && <p>{e.notes}</p>}<div className="muted">{e.uses_bands ? "Progreso: menos gomas = más fuerza" : `1RM estimado: ${orm ? `${orm.toFixed(1)} kg` : "—"}`}</div></div> })}</div></div> }
 
 function Progress({ workouts }: { workouts: Workout[] }) {
     const names = [...new Set(workouts.flatMap(w => w.workout_exercises.map(e => e.name)))];
