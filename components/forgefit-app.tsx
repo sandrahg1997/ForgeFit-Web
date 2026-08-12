@@ -2,8 +2,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase, hasSupabaseEnv } from "@/lib/supabase";
 import type { Exercise, Measurement, Routine, Workout, WorkoutSet, MuscleGroup, LoadType } from "@/lib/types";
-import { groupColor, oneRM, repsTemplate, streak, workoutGroup, workoutVolume } from "@/lib/helpers";
-import { Activity, CalendarDays, ChartNoAxesCombined, Dumbbell, LogOut, Plus, Search, Settings, Trash2, UserRound, Check, Download } from "lucide-react";
+import { groupColor, lastExerciseUsage, lastWorkoutOfType, oneRM, repsTemplate, streak, workoutGroup, workoutVolume } from "@/lib/helpers";
+import { Activity, CalendarDays, ChartNoAxesCombined, Dumbbell, LogOut, Plus, Search, Settings, Trash2, UserRound, Check, Download, Eye, EyeOff } from "lucide-react";
 import * as XLSX from "xlsx";
 import { LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
@@ -48,11 +48,11 @@ function demoData() {
 }
 
 export default function ForgeFitApp() {
-    const [session, setSession] = useState<any>(null), [loading, setLoading] = useState(true), [email, setEmail] = useState(""), [password, setPassword] = useState(""), [authMsg, setAuthMsg] = useState(""), [authBusy, setAuthBusy] = useState<"login" | "signup" | null>(null);
+    const [session, setSession] = useState<any>(null), [loading, setLoading] = useState(true), [email, setEmail] = useState(""), [password, setPassword] = useState(""), [showPassword, setShowPassword] = useState(false), [authMsg, setAuthMsg] = useState(""), [authBusy, setAuthBusy] = useState<"login" | "signup" | null>(null);
     useEffect(() => { if (!supabase) { setLoading(false); return } supabase.auth.getSession().then(({ data }) => { setSession(data.session); setLoading(false) }); const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s)); return () => data.subscription.unsubscribe() }, []);
     async function auth(mode: "login" | "signup") { if (!supabase) return; setAuthMsg(""); setAuthBusy(mode); const result = mode === "login" ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password }); setAuthBusy(null); const message = result.error?.message || ""; if (message && /secret API key|service role|service_role/i.test(message)) { setAuthMsg("Estás usando una clave secreta de Supabase. En la app web debes usar la clave pública/anónima (publishable) en NEXT_PUBLIC_SUPABASE_ANON_KEY, no la service_role."); return; } setAuthMsg(message || (mode === "signup" ? "Cuenta creada. Revisa tu correo si la confirmación está activa." : "")) }
     if (loading) return <div className="auth"><div className="card row" style={{ justifyContent: "center" }}><Spinner size={20} /> Cargando ForgeFit…</div></div>;
-    if (hasSupabaseEnv && !session) return <div className="auth"><div className="card stack"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">Tu progreso, sin ruido.</span></div></div><div><label className="label">Correo</label><input className="field" value={email} onChange={e => setEmail(e.target.value)} type="email" /></div><div><label className="label">Contraseña</label><input className="field" value={password} onChange={e => setPassword(e.target.value)} type="password" /></div>{authMsg && <div className="muted">{authMsg}</div>}<button className="button" disabled={!!authBusy} onClick={() => auth("login")}>{authBusy === "login" ? <Spinner size={16} /> : "Entrar"}</button><button className="button secondary" disabled={!!authBusy} onClick={() => auth("signup")}>{authBusy === "signup" ? <Spinner size={16} /> : "Crear cuenta"}</button></div></div>;
+    if (hasSupabaseEnv && !session) return <div className="auth"><div className="card stack"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">Tu progreso, sin ruido.</span></div></div><div><label className="label">Correo</label><input className="field" value={email} onChange={e => setEmail(e.target.value)} type="email" /></div><div><label className="label">Contraseña</label><div className="row" style={{ position: "relative" }}><input className="field" style={{ paddingRight: 42 }} value={password} onChange={e => setPassword(e.target.value)} type={showPassword ? "text" : "password"} /><button type="button" aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"} onClick={() => setShowPassword(x => !x)} style={{ position: "absolute", right: 10, background: "transparent", border: 0, color: "var(--muted)", padding: 4, display: "grid", placeItems: "center" }}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></div>{authMsg && <div className="muted">{authMsg}</div>}<button className="button" disabled={!!authBusy} onClick={() => auth("login")}>{authBusy === "login" ? <Spinner size={16} /> : "Entrar"}</button><button className="button secondary" disabled={!!authBusy} onClick={() => auth("signup")}>{authBusy === "signup" ? <Spinner size={16} /> : "Crear cuenta"}</button></div></div>;
     return <Main session={session} />;
 }
 
@@ -118,7 +118,33 @@ function Main({ session }: { session: any }) {
             flash("Serie eliminada");
         } finally { setBusy(false) }
     }
-    async function addWorkout(r: Routine, selectedDate: string) { setBusy(true); const id = uid(); const workoutDate = new Date(`${selectedDate}T12:00:00`).toISOString(); const workout: Workout = { id, date: workoutDate, title: r.name, notes: "", is_completed: false, workout_exercises: r.routine_exercises.sort((a, b) => a.order_index - b.order_index).map((re, i) => ({ id: uid(), name: re.exercise.name, muscle_group: re.exercise.muscle_group, load_type: re.exercise.load_type, order_index: i, note: re.exercise.notes || "", uses_bands: re.exercise.uses_bands, workout_sets: repsTemplate.map((reps, j) => ({ id: uid(), order_index: j, repetitions: reps, weight: re.exercise.uses_bands ? 0 : (re.default_weight || 0), band_name: re.default_band_name || "", band_count: re.exercise.uses_bands ? (re.default_band_count || 0) : 0, is_completed: false })) })) }; setWorkouts(p => [workout, ...p].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())); setOpenWorkout(id); setTab("entrenos"); setModal(null); try { if (supabase && session) { await supabase.from("workouts").insert({ id, title: workout.title, date: workout.date, notes: "", is_completed: false, user_id: session.user.id }); for (const e of workout.workout_exercises) { await supabase.from("workout_exercises").insert({ id: e.id, workout_id: id, user_id: session.user.id, name: e.name, muscle_group: e.muscle_group, load_type: e.load_type, order_index: e.order_index, note: e.note, uses_bands: e.uses_bands }); await supabase.from("workout_sets").insert(e.workout_sets.map(s => ({ ...s, workout_exercise_id: e.id, user_id: session.user.id }))) } } } finally { setBusy(false) } }
+    async function addWorkout(r: Routine, selectedDate: string) {
+        setBusy(true);
+        const id = uid();
+        const workoutDate = new Date(`${selectedDate}T12:00:00`).toISOString();
+        const source = lastWorkoutOfType(workouts, r.muscle_group);
+        const workout_exercises = source
+            ? source.workout_exercises.slice().sort((a, b) => a.order_index - b.order_index).map((e, i) => ({
+                id: uid(), name: e.name, muscle_group: e.muscle_group, load_type: e.load_type, order_index: i, note: e.note, uses_bands: e.uses_bands,
+                workout_sets: e.workout_sets.slice().sort((a, b) => a.order_index - b.order_index).map((s, j) => ({ id: uid(), order_index: j, repetitions: s.repetitions, weight: s.weight, band_name: s.band_name, band_count: s.band_count, is_completed: false })),
+            }))
+            : r.routine_exercises.slice().sort((a, b) => a.order_index - b.order_index).map((re, i) => ({
+                id: uid(), name: re.exercise.name, muscle_group: re.exercise.muscle_group, load_type: re.exercise.load_type, order_index: i, note: re.exercise.notes || "", uses_bands: re.exercise.uses_bands,
+                workout_sets: repsTemplate.map((reps, j) => ({ id: uid(), order_index: j, repetitions: reps, weight: re.exercise.uses_bands ? 0 : (re.default_weight || 0), band_name: re.default_band_name || "", band_count: re.exercise.uses_bands ? (re.default_band_count || 0) : 0, is_completed: false })),
+            }));
+        const workout: Workout = { id, date: workoutDate, title: r.name, notes: "", is_completed: false, workout_exercises };
+        setWorkouts(p => [workout, ...p].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+        setOpenWorkout(id); setTab("entrenos"); setModal(null);
+        try {
+            if (supabase && session) {
+                await supabase.from("workouts").insert({ id, title: workout.title, date: workout.date, notes: "", is_completed: false, user_id: session.user.id });
+                for (const e of workout.workout_exercises) {
+                    await supabase.from("workout_exercises").insert({ id: e.id, workout_id: id, user_id: session.user.id, name: e.name, muscle_group: e.muscle_group, load_type: e.load_type, order_index: e.order_index, note: e.note, uses_bands: e.uses_bands });
+                    await supabase.from("workout_sets").insert(e.workout_sets.map(s => ({ ...s, workout_exercise_id: e.id, user_id: session.user.id })));
+                }
+            }
+        } finally { setBusy(false) }
+    }
     async function completeWorkout(id: string) { setBusy(true); setWorkouts(p => p.map(w => w.id === id ? { ...w, is_completed: true } : w)); try { if (supabase && session) await supabase.from("workouts").update({ is_completed: true }).eq("id", id); flash("Entrenamiento completado ✨") } finally { setBusy(false) } }
     async function deleteWorkout(id: string) { if (!confirm("¿Eliminar este entrenamiento?")) return; setBusy(true); setWorkouts(p => p.filter(w => w.id !== id)); setOpenWorkout(null); try { if (supabase && session) await supabase.from("workouts").delete().eq("id", id) } finally { setBusy(false) } }
     async function addExerciseToWorkout(workoutId: string, exercise: Exercise) {
@@ -128,6 +154,7 @@ function Main({ session }: { session: any }) {
         setBusy(true);
         try {
 
+        const lastUsage = lastExerciseUsage(workouts, exercise.name);
         const workoutExercise = {
             id: uid(),
             name: exercise.name,
@@ -136,15 +163,25 @@ function Main({ session }: { session: any }) {
             order_index: workout.workout_exercises.length,
             note: exercise.notes || "",
             uses_bands: exercise.uses_bands,
-            workout_sets: repsTemplate.map((repetitions, order_index) => ({
-                id: uid(),
-                order_index,
-                repetitions,
-                weight: 0,
-                band_name: "",
-                band_count: 0,
-                is_completed: false,
-            })),
+            workout_sets: lastUsage
+                ? lastUsage.workout_sets.slice().sort((a, b) => a.order_index - b.order_index).map((s, order_index) => ({
+                    id: uid(),
+                    order_index,
+                    repetitions: s.repetitions,
+                    weight: s.weight,
+                    band_name: s.band_name,
+                    band_count: s.band_count,
+                    is_completed: false,
+                }))
+                : repsTemplate.map((repetitions, order_index) => ({
+                    id: uid(),
+                    order_index,
+                    repetitions,
+                    weight: 0,
+                    band_name: "",
+                    band_count: 0,
+                    is_completed: false,
+                })),
         };
 
         setWorkouts(previous => previous.map(currentWorkout => currentWorkout.id === workoutId ? {
@@ -186,7 +223,7 @@ function Main({ session }: { session: any }) {
             }
         }
 
-        flash("Ejercicio añadido a la sesión");
+        flash(lastUsage ? "Ejercicio añadido con tus últimos pesos y series" : "Ejercicio añadido a la sesión");
         } finally { setBusy(false) }
     }
 
@@ -268,7 +305,7 @@ function Main({ session }: { session: any }) {
     }
     async function addMeasurement(data: Omit<Measurement, "id">) { const x = { ...data, id: uid() }; setBusy(true); setMeasurements(p => [...p, x].sort((a, b) => a.date.localeCompare(b.date))); try { if (supabase && session) await supabase.from("body_measurements").insert({ ...x, user_id: session.user.id }); setModal(null) } finally { setBusy(false) } }
     const nav: [Tab, string, any][] = [["inicio", "Inicio", Activity], ["entrenos", "Entrenos", Dumbbell], ["calendario", "Calendario", CalendarDays], ["ejercicios", "Ejercicios", Search], ["progreso", "Progreso", ChartNoAxesCombined], ["medidas", "Medidas", UserRound], ["ajustes", "Ajustes", Settings]];
-    return <div className="shell">{toast && <div className="toast">{toast}</div>}<header className="topbar"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">{session?.user?.email || "Modo demostración local"}</span></div></div>{busy && <span className="muted row" style={{ gap: 8 }}><Spinner size={14} /> Sincronizando…</span>}</header><nav className="nav">{nav.map(([id, label, Icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><Icon size={16} /> <span className="hideMobile">{label}</span></button>)}</nav><main style={{ marginTop: 18 }}>{tab === "inicio" && <Dashboard workouts={workouts} routines={routines} measurements={measurements} onNew={() => setModal("workout")} onOpen={id => { setOpenWorkout(id); setTab("entrenos") }} />}{tab === "entrenos" && <Workouts workouts={workouts} exercises={exercises} active={openWorkout} setActive={setOpenWorkout} onNew={() => setModal("workout")} onSet={persistSet} onRemoveSet={removeSet} onComplete={completeWorkout} onDelete={deleteWorkout} onAddExercise={addExerciseToWorkout} onRemoveExercise={removeExerciseFromWorkout} onUpdateExercise={updateWorkoutExercise} busy={busy} />} {tab === "calendario" && <Calendar workouts={workouts} />} {tab === "ejercicios" && <Exercises exercises={exercises} workouts={workouts} onNew={() => setModal("exercise")} onEdit={setEditExercise} />} {tab === "progreso" && <Progress workouts={workouts} />} {tab === "medidas" && <Measurements data={measurements} onNew={() => setModal("measurement")} />} {tab === "ajustes" && <SettingsView workouts={workouts} exercises={exercises} routines={routines} measurements={measurements} session={session} />}</main>{modal === "workout" && <RoutineModal routines={routines} close={() => setModal(null)} choose={addWorkout} busy={busy} />} {modal === "exercise" && <ExerciseModal close={() => setModal(null)} save={addExercise} busy={busy} />} {modal === "measurement" && <MeasurementModal close={() => setModal(null)} save={addMeasurement} busy={busy} />}{editExercise && <ExerciseModal close={() => setEditExercise(null)} save={data => updateExercise(editExercise.id, data)} busy={busy} initial={editExercise} />}</div>
+    return <div className="shell">{toast && <div className="toast">{toast}</div>}<header className="topbar"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">{session?.user?.email || "Modo demostración local"}</span></div></div>{busy && <span className="muted row" style={{ gap: 8 }}><Spinner size={14} /> Sincronizando…</span>}</header><nav className="nav">{nav.map(([id, label, Icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><Icon size={16} /> <span className="hideMobile">{label}</span></button>)}</nav><main style={{ marginTop: 18 }}>{tab === "inicio" && <Dashboard workouts={workouts} routines={routines} measurements={measurements} onNew={() => setModal("workout")} onOpen={id => { setOpenWorkout(id); setTab("entrenos") }} />}{tab === "entrenos" && <Workouts workouts={workouts} exercises={exercises} active={openWorkout} setActive={setOpenWorkout} onNew={() => setModal("workout")} onSet={persistSet} onRemoveSet={removeSet} onComplete={completeWorkout} onDelete={deleteWorkout} onAddExercise={addExerciseToWorkout} onRemoveExercise={removeExerciseFromWorkout} onUpdateExercise={updateWorkoutExercise} busy={busy} />} {tab === "calendario" && <Calendar workouts={workouts} />} {tab === "ejercicios" && <Exercises exercises={exercises} workouts={workouts} onNew={() => setModal("exercise")} onEdit={setEditExercise} />} {tab === "progreso" && <Progress workouts={workouts} />} {tab === "medidas" && <Measurements data={measurements} onNew={() => setModal("measurement")} />} {tab === "ajustes" && <SettingsView workouts={workouts} exercises={exercises} routines={routines} measurements={measurements} session={session} />}</main>{modal === "workout" && <RoutineModal routines={routines} workouts={workouts} close={() => setModal(null)} choose={addWorkout} busy={busy} />} {modal === "exercise" && <ExerciseModal close={() => setModal(null)} save={addExercise} busy={busy} />} {modal === "measurement" && <MeasurementModal close={() => setModal(null)} save={addMeasurement} busy={busy} />}{editExercise && <ExerciseModal close={() => setEditExercise(null)} save={data => updateExercise(editExercise.id, data)} busy={busy} initial={editExercise} />}</div>
 }
 
 function Dashboard({ workouts, routines, measurements, onNew, onOpen }: { workouts: Workout[]; routines: Routine[]; measurements: Measurement[]; onNew: () => void; onOpen: (id: string) => void }) { const completed = workouts.filter(w => w.is_completed), latest = workouts[0], vol = completed.reduce((a, w) => a + workoutVolume(w), 0); return <div className="stack"><section className="card hero"><div className="row between"><div><div className="muted">Hoy</div><div className="big">¿Qué vamos a forjar?</div><p>Empieza una rutina y ForgeFit preparará 4 series de 12, 10, 8 y 6.</p></div><button className="button" onClick={onNew}><Plus size={17} /> Nueva sesión</button></div></section><div className="grid grid3"><Stat title="Racha semanal" value={`${streak(workouts)} semanas`} icon="🔥" /><Stat title="Entrenamientos" value={String(completed.length)} icon="✅" /><Stat title="Volumen acumulado" value={`${Math.round(vol).toLocaleString("es-ES")} kg`} icon="📈" /></div><div className="grid grid2"><section className="card"><h2>Rutinas</h2><div className="stack">{routines.map(r => <div className="row between" key={r.id}><div className="row"><span className="dot" style={{ background: groupColor[r.muscle_group] }} /><div><b>{r.name}</b><div className="muted">{r.routine_exercises.length} ejercicios</div></div></div><button className="button small" onClick={onNew}>Empezar</button></div>)}</div></section><section className="card"><h2>Última actividad</h2>{latest ? <div className="workout" onClick={() => onOpen(latest.id)}><h3>{latest.title}</h3><div className="muted">{new Date(latest.date).toLocaleDateString("es-ES")} · {latest.workout_exercises.length} ejercicios</div><p>{Math.round(workoutVolume(latest)).toLocaleString("es-ES")} kg de volumen</p></div> : <p className="muted">Tu primer entrenamiento está esperando.</p>}{measurements.length > 0 && <p className="muted">Última cintura: {measurements.at(-1)?.waist || "—"} cm</p>}</section></div></div> }
@@ -295,6 +332,7 @@ function Workouts({ workouts, exercises, active, setActive, onNew, onSet, onRemo
         return <WorkoutDetail
             w={w}
             exercises={exercises}
+            workouts={workouts}
             back={() => setActive(null)}
             onSet={onSet}
             onRemoveSet={(exerciseId, setId) => onRemoveSet(w.id, exerciseId, setId)}
@@ -313,6 +351,7 @@ function Workouts({ workouts, exercises, active, setActive, onNew, onSet, onRemo
 function WorkoutDetail({
     w,
     exercises,
+    workouts,
     back,
     onSet,
     onRemoveSet,
@@ -325,6 +364,7 @@ function WorkoutDetail({
 }: {
     w: Workout;
     exercises: Exercise[];
+    workouts: Workout[];
     back: () => void;
     onSet: any;
     onRemoveSet: (exerciseId: string, setId: string) => void;
@@ -387,7 +427,7 @@ function WorkoutDetail({
                 </div>
             ))}
 
-            {showExerciseSelector && <WorkoutExerciseModal exercises={exercises} workout={w} close={() => setShowExerciseSelector(false)} choose={exercise => { onAddExercise(exercise); setShowExerciseSelector(false); }} />}
+            {showExerciseSelector && <WorkoutExerciseModal exercises={exercises} workout={w} workouts={workouts} close={() => setShowExerciseSelector(false)} choose={exercise => { onAddExercise(exercise); setShowExerciseSelector(false); }} />}
             {editingExercise && <EditWorkoutExerciseModal exercise={editingExercise} close={() => setEditingExerciseId(null)} save={patch => { onUpdateExercise(editingExercise.id, patch); setEditingExerciseId(null); }} />}
         </div>
     );
@@ -432,10 +472,16 @@ function SettingsView({ workouts, exercises, routines, measurements, session }: 
     return <div className="grid grid2"><div className="card stack"><h2>Exportación</h2><p className="muted">Genera un Excel con sesiones, series, ejercicios, rutinas y medidas.</p><button className="button" disabled={exporting} onClick={exportExcel}>{exporting ? <Spinner size={16} /> : <><Download size={17} /> Exportar todos los datos</>}</button></div><div className="card stack"><h2>Cuenta</h2><div className="muted">{session?.user?.email || "Modo demostración: los cambios no persisten al recargar."}</div>{session && <button className="button secondary" disabled={signingOut} onClick={signOut}>{signingOut ? <Spinner size={16} /> : <><LogOut size={17} /> Cerrar sesión</>}</button>}</div><div className="card"><h2>Instalar como app</h2><p className="muted">En Safari o Chrome usa “Añadir a pantalla de inicio”. ForgeFit incluye manifiesto PWA.</p></div><div className="card"><h2>Privacidad</h2><p className="muted">Con Supabase, cada usuario solo puede acceder a sus propios registros mediante políticas RLS.</p></div></div>
 }
 
-function RoutineModal({ routines, close, choose, busy }: { routines: Routine[]; close: () => void; choose: (r: Routine, date: string) => void; busy: boolean }) { const [date, setDate] = useState(today()); return <Modal close={close}><h2>Empezar entrenamiento</h2><div className="stack"><div><label className="label">Fecha del entrenamiento</label><input className="field" type="date" max={today()} value={date} onChange={e => setDate(e.target.value)} /></div>{routines.map(r => <button className="card workout" style={{ color: "inherit", textAlign: "left" }} key={r.id} onClick={() => choose(r, date)} disabled={!date || busy}><div className="exerciseHeader" style={{ borderColor: groupColor[r.muscle_group] }}><h3>{r.name}</h3><span className="muted">{r.routine_exercises.length} ejercicios · 4 series por ejercicio</span></div></button>)}</div></Modal> }
+function RoutineModal({ routines, workouts, close, choose, busy }: { routines: Routine[]; workouts: Workout[]; close: () => void; choose: (r: Routine, date: string) => void; busy: boolean }) {
+    const [date, setDate] = useState(today());
+    return <Modal close={close}><h2>Empezar entrenamiento</h2><div className="stack"><div><label className="label">Fecha del entrenamiento</label><input className="field" type="date" max={today()} value={date} onChange={e => setDate(e.target.value)} /></div>{routines.map(r => {
+        const last = lastWorkoutOfType(workouts, r.muscle_group);
+        return <button className="card workout" style={{ color: "inherit", textAlign: "left" }} key={r.id} onClick={() => choose(r, date)} disabled={!date || busy}><div className="exerciseHeader" style={{ borderColor: groupColor[r.muscle_group] }}><h3>{r.name}</h3><span className="muted">{last ? `Basado en tu última sesión (${new Date(last.date).toLocaleDateString("es-ES")}) · ${last.workout_exercises.length} ejercicios` : `${r.routine_exercises.length} ejercicios · 4 series por ejercicio`}</span></div></button>;
+    })}</div></Modal>;
+}
 function ExerciseModal({ close, save, busy, initial }: { close: () => void; save: (x: Omit<Exercise, "id">) => void; busy: boolean; initial?: Exercise }) { const [name, setName] = useState(initial?.name || ""), [muscle_group, setGroup] = useState<MuscleGroup>(initial?.muscle_group || "Pecho"), [load_type, setLoad] = useState<LoadType>(initial?.load_type || loads[0]), [notes, setNotes] = useState(initial?.notes || ""), [uses_bands, setUsesBands] = useState(initial?.uses_bands || false); return <Modal close={close}><h2>{initial ? "Editar ejercicio" : "Nuevo ejercicio"}</h2><div className="stack"><input className="field" placeholder="Nombre" value={name} onChange={e => setName(e.target.value)} /><select className="field" value={muscle_group} onChange={e => setGroup(e.target.value as MuscleGroup)}>{muscles.map(x => <option key={x}>{x}</option>)}</select><select className="field" value={load_type} onChange={e => setLoad(e.target.value as LoadType)}>{loads.map(x => <option key={x}>{x}</option>)}</select><label className="row"><input type="checkbox" checked={uses_bands} onChange={e => setUsesBands(e.target.checked)} /> Se hace con gomas de asistencia (en vez de peso, se registra el nº de gomas)</label><textarea className="field" placeholder="Notas técnicas" value={notes} onChange={e => setNotes(e.target.value)} /><button className="button" disabled={!name.trim() || busy} onClick={() => save({ name, muscle_group, load_type, notes, uses_bands })}>{busy ? <Spinner size={16} /> : (initial ? "Guardar cambios" : "Guardar ejercicio")}</button></div></Modal> }
 function MeasurementModal({ close, save, busy }: { close: () => void; save: (x: any) => void; busy: boolean }) { const [v, setV] = useState<any>({ date: today(), waist: 0, chest: 0, relaxed_arm: 0, flexed_arm: 0, thigh: 0, hips: 0, notes: "" }); const fields: [[string, string]] | any = [["waist", "Cintura"], ["chest", "Pecho"], ["relaxed_arm", "Brazo relajado"], ["flexed_arm", "Brazo flexionado"], ["thigh", "Muslo"], ["hips", "Cadera"]]; return <Modal close={close}><h2>Nuevas medidas</h2><div className="stack"><input type="date" className="field" value={v.date} onChange={e => setV({ ...v, date: e.target.value })} /><div className="grid grid2">{fields.map(([key, label]: [string, string]) => <div key={key}><label className="label">{label} (cm)</label><input className="field" type="number" step="0.1" value={v[key]} onFocus={selectAll} onMouseUp={selectAllOnClick} onChange={e => setV({ ...v, [key]: Number(e.target.value) })} /></div>)}</div><textarea className="field" placeholder="Notas" value={v.notes} onChange={e => setV({ ...v, notes: e.target.value })} /><button className="button" disabled={busy} onClick={() => save(v)}>{busy ? <Spinner size={16} /> : "Guardar medidas"}</button></div></Modal> }
-function WorkoutExerciseModal({ exercises, workout, close, choose }: { exercises: Exercise[]; workout: Workout; close: () => void; choose: (exercise: Exercise) => void }) {
+function WorkoutExerciseModal({ exercises, workout, workouts, close, choose }: { exercises: Exercise[]; workout: Workout; workouts: Workout[]; close: () => void; choose: (exercise: Exercise) => void }) {
     const [query, setQuery] = useState("");
     const existingNames = new Set(workout.workout_exercises.map(exercise => exercise.name.toLowerCase()));
     const availableExercises = exercises.filter(exercise => {
@@ -443,7 +489,14 @@ function WorkoutExerciseModal({ exercises, workout, close, choose }: { exercises
         return haystack.includes(query.toLowerCase()) && !existingNames.has(exercise.name.toLowerCase());
     });
 
-    return <Modal close={close}><h2>Añadir ejercicio a la sesión</h2><div className="stack"><div className="row"><Search size={18} /><input autoFocus className="field" placeholder="Buscar ejercicio…" value={query} onChange={event => setQuery(event.target.value)} /></div>{availableExercises.length === 0 ? <div className="muted">No hay ejercicios disponibles con ese filtro.</div> : availableExercises.map(exercise => <button key={exercise.id} className="card workout" style={{ color: "inherit", textAlign: "left" }} onClick={() => choose(exercise)}><div className="exerciseHeader" style={{ borderColor: groupColor[exercise.muscle_group] }}><h3>{exercise.name}</h3><div className="muted">{exercise.muscle_group} · {exercise.load_type}</div></div></button>)}</div></Modal>;
+    return <Modal close={close}><h2>Añadir ejercicio a la sesión</h2><div className="stack"><div className="row"><Search size={18} /><input autoFocus className="field" placeholder="Buscar ejercicio…" value={query} onChange={event => setQuery(event.target.value)} /></div>{availableExercises.length === 0 ? <div className="muted">No hay ejercicios disponibles con ese filtro.</div> : availableExercises.map(exercise => {
+        const last = lastExerciseUsage(workouts, exercise.name);
+        const lastSet = last?.workout_sets.slice().sort((a, b) => a.order_index - b.order_index)[0];
+        const hint = last && lastSet
+            ? `Última vez: ${last.uses_bands ? `${lastSet.band_count} gomas` : `${lastSet.weight} kg`} · ${last.workout_sets.length} series`
+            : `${exercise.muscle_group} · ${exercise.load_type}`;
+        return <button key={exercise.id} className="card workout" style={{ color: "inherit", textAlign: "left" }} onClick={() => choose(exercise)}><div className="exerciseHeader" style={{ borderColor: groupColor[exercise.muscle_group] }}><h3>{exercise.name}</h3><div className="muted">{hint}</div></div></button>;
+    })}</div></Modal>;
 }
 
 function EditWorkoutExerciseModal({ exercise, close, save }: {
