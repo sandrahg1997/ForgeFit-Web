@@ -99,6 +99,11 @@ function Main({ session }: { session: any }) {
     }
     async function ensureSeed() { if (!supabase || !session) return; const { count } = await supabase.from("exercises").select("*", { count: "exact", head: true }); if (!count) await supabase.rpc("seed_forgefit_for_user") }
     function flash(x: string) { setToast(x); setTimeout(() => setToast(""), 2400) }
+    // Peso y repeticiones se escriben mientras el usuario teclea; agrupamos esas escrituras
+    // (debounce) para no mandar una petición a Supabase por cada pulsación.
+    const pendingWrites = useRef<Map<string, { timer: ReturnType<typeof setTimeout>; run: () => void }>>(new Map());
+    function flushPendingWrites() { for (const { timer, run } of pendingWrites.current.values()) { clearTimeout(timer); run() } pendingWrites.current.clear() }
+    useEffect(() => () => flushPendingWrites(), []);
     async function persistSet(workoutId: string, exId: string, setId: string, patch: Partial<WorkoutSet>) {
         let isRecord = false, recordMsg = "🏆 ¡Nuevo récord personal!";
         setWorkouts(prev => prev.map(w => {
@@ -128,7 +133,19 @@ function Main({ session }: { session: any }) {
                 })
             };
         }));
-        if (supabase && session) await supabase.from("workout_sets").update(patch).eq("id", setId);
+        if (supabase && session) {
+            const field = Object.keys(patch)[0];
+            const run = () => { supabase!.from("workout_sets").update(patch).eq("id", setId); };
+            if (field === "weight" || field === "repetitions") {
+                const key = `${setId}:${field}`;
+                const existing = pendingWrites.current.get(key);
+                if (existing) clearTimeout(existing.timer);
+                const timer = setTimeout(() => { run(); pendingWrites.current.delete(key); }, 500);
+                pendingWrites.current.set(key, { timer, run });
+            } else {
+                run();
+            }
+        }
         if (isRecord) flash(recordMsg);
     }
     async function removeSet(workoutId: string, exerciseId: string, setId: string) {
@@ -227,7 +244,7 @@ function Main({ session }: { session: any }) {
             setEditRoutine(null); flash("Rutina actualizada");
         } finally { setBusy(false) }
     }
-    async function completeWorkout(id: string) { setBusy(true); setWorkouts(p => p.map(w => w.id === id ? { ...w, is_completed: true } : w)); try { if (supabase && session) await supabase.from("workouts").update({ is_completed: true }).eq("id", id); flash("Entrenamiento completado ✨") } finally { setBusy(false) } }
+    async function completeWorkout(id: string) { flushPendingWrites(); setBusy(true); setWorkouts(p => p.map(w => w.id === id ? { ...w, is_completed: true } : w)); try { if (supabase && session) await supabase.from("workouts").update({ is_completed: true }).eq("id", id); flash("Entrenamiento completado ✨") } finally { setBusy(false) } }
     async function deleteWorkout(id: string) { if (!confirm("¿Eliminar este entrenamiento?")) return; setBusy(true); setWorkouts(p => p.filter(w => w.id !== id)); setOpenWorkout(null); try { if (supabase && session) await supabase.from("workouts").delete().eq("id", id) } finally { setBusy(false) } }
     async function addExerciseToWorkout(workoutId: string, exercise: Exercise) {
         const workout = workouts.find(w => w.id === workoutId);
@@ -492,8 +509,18 @@ function Main({ session }: { session: any }) {
     return <div className="shell">{toast && <div className="toast">{toast}</div>}<header className="topbar"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">{session?.user?.email || "Modo demostración local"}</span></div></div>{busy && <span className="muted row" style={{ gap: 8 }}><Spinner size={14} /> Sincronizando…</span>}</header><nav className="nav">{nav.map(([id, label, Icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><Icon size={16} /> <span className="hideMobile">{label}</span></button>)}</nav><main style={{ marginTop: 18 }}>{tab === "inicio" && <Dashboard workouts={workouts} routines={routines} measurements={measurements} onNew={() => setModal("workout")} onOpen={id => { setOpenWorkout(id); setTab("entrenos") }} />}{tab === "entrenos" && <Workouts workouts={workouts} exercises={exercises} active={openWorkout} setActive={setOpenWorkout} onNew={() => setModal("workout")} onSet={persistSet} onRemoveSet={removeSet} onComplete={completeWorkout} onDelete={deleteWorkout} onAddExercise={addExerciseToWorkout} onRemoveExercise={removeExerciseFromWorkout} onUpdateExercise={updateWorkoutExercise} hasMore={moreWorkouts} onLoadMore={loadMoreWorkouts} busy={busy} />} {tab === "calendario" && <Calendar workouts={workouts} />} {tab === "ejercicios" && <Exercises exercises={exercises} workouts={workouts} onNew={() => setModal("exercise")} onEdit={setEditExercise} />} {tab === "progreso" && <Progress workouts={workouts} />} {tab === "medidas" && <Measurements data={measurements} onNew={() => setModal("measurement")} />} {tab === "ajustes" && <SettingsView workouts={workouts} exercises={exercises} routines={routines} measurements={measurements} session={session} onImport={importExcel} busy={busy} />}</main>{modal === "workout" && <RoutineModal routines={routines} workouts={workouts} close={() => setModal(null)} choose={addWorkout} onBlank={addBlankWorkout} onCreateRoutine={() => setModal("routine")} onEditRoutine={r => { setModal(null); setEditRoutine(r); }} busy={busy} />} {modal === "exercise" && <ExerciseModal close={() => setModal(null)} save={addExercise} busy={busy} />} {modal === "measurement" && <MeasurementModal close={() => setModal(null)} save={addMeasurement} busy={busy} />}{modal === "routine" && <RoutineFormModal exercises={exercises} close={() => setModal(null)} save={addRoutine} busy={busy} />}{editRoutine && <RoutineFormModal exercises={exercises} close={() => setEditRoutine(null)} save={data => updateRoutine(editRoutine.id, data)} busy={busy} initial={editRoutine} />}{editExercise && <ExerciseModal close={() => setEditExercise(null)} save={data => updateExercise(editExercise.id, data)} busy={busy} initial={editExercise} />}</div>
 }
 
-function Dashboard({ workouts, routines, measurements, onNew, onOpen }: { workouts: Workout[]; routines: Routine[]; measurements: Measurement[]; onNew: () => void; onOpen: (id: string) => void }) { const completed = workouts.filter(w => w.is_completed), latest = workouts[0], vol = completed.reduce((a, w) => a + workoutVolume(w), 0); return <div className="stack"><section className="card hero"><div className="row between"><div><div className="muted">Hoy</div><div className="big">¿Qué vamos a forjar?</div><p>Empieza una rutina y ForgeFit preparará 4 series de 12, 10, 8 y 6.</p></div><button className="button" onClick={onNew}><Plus size={17} /> Nueva sesión</button></div></section><div className="grid grid3"><Stat title="Racha semanal" value={`${streak(workouts)} semanas`} icon="🔥" /><Stat title="Entrenamientos" value={String(completed.length)} icon="✅" /><Stat title="Volumen acumulado" value={`${Math.round(vol).toLocaleString("es-ES")} kg`} icon="📈" /></div><div className="grid grid2"><section className="card"><h2>Rutinas</h2><div className="stack">{routines.map(r => <div className="row between" key={r.id}><div className="row"><span className="dot" style={{ background: groupColor[r.muscle_group] }} /><div><b>{r.name}</b><div className="muted">{r.routine_exercises.length} ejercicios</div></div></div><button className="button small" onClick={onNew}>Empezar</button></div>)}</div></section><section className="card"><h2>Última actividad</h2>{latest ? <div className="workout" onClick={() => onOpen(latest.id)}><h3>{latest.title}</h3><div className="muted">{new Date(latest.date).toLocaleDateString("es-ES")} · {latest.workout_exercises.length} ejercicios</div><p>{Math.round(workoutVolume(latest)).toLocaleString("es-ES")} kg de volumen</p></div> : <p className="muted">Tu primer entrenamiento está esperando.</p>}{measurements.length > 0 && <p className="muted">Última cintura: {measurements.at(-1)?.waist || "—"} cm</p>}</section></div></div> }
-function Stat({ title, value, icon }: { title: string; value: string; icon: string }) { return <div className="card"><div className="row between"><div><div className="muted">{title}</div><div className="big">{value}</div></div><span style={{ fontSize: 30 }}>{icon}</span></div></div> }
+function mondayOf(d: Date) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+function Dashboard({ workouts, routines, measurements, onNew, onOpen }: { workouts: Workout[]; routines: Routine[]; measurements: Measurement[]; onNew: () => void; onOpen: (id: string) => void }) {
+    const completed = workouts.filter(w => w.is_completed), latest = workouts[0];
+    const thisWeekStart = mondayOf(new Date());
+    const lastWeekStart = new Date(thisWeekStart); lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+    const volumeBetween = (from: Date, to: Date) => completed.filter(w => { const t = new Date(w.date).getTime(); return t >= from.getTime() && t < to.getTime() }).reduce((a, w) => a + workoutVolume(w), 0);
+    const thisWeekVol = volumeBetween(thisWeekStart, new Date(thisWeekStart.getTime() + 7 * 86400000));
+    const lastWeekVol = volumeBetween(lastWeekStart, thisWeekStart);
+    const deltaPct = lastWeekVol > 0 ? Math.round(((thisWeekVol - lastWeekVol) / lastWeekVol) * 100) : null;
+    const trendHint = thisWeekVol === 0 && lastWeekVol === 0 ? undefined : deltaPct === null ? "Sin datos la semana pasada" : `${deltaPct >= 0 ? "▲" : "▼"} ${Math.abs(deltaPct)}% vs. semana pasada`;
+    return <div className="stack"><section className="card hero"><div className="row between"><div><div className="muted">Hoy</div><div className="big">¿Qué vamos a forjar?</div><p>Empieza una rutina y ForgeFit preparará 4 series de 12, 10, 8 y 6.</p></div><button className="button" onClick={onNew}><Plus size={17} /> Nueva sesión</button></div></section><div className="grid grid3"><Stat title="Racha semanal" value={`${streak(workouts)} semanas`} icon="🔥" /><Stat title="Entrenamientos" value={String(completed.length)} icon="✅" /><Stat title="Volumen esta semana" value={`${Math.round(thisWeekVol).toLocaleString("es-ES")} kg`} icon="📈" hint={trendHint} /></div><div className="grid grid2"><section className="card"><h2>Rutinas</h2><div className="stack">{routines.map(r => <div className="row between" key={r.id}><div className="row"><span className="dot" style={{ background: groupColor[r.muscle_group] }} /><div><b>{r.name}</b><div className="muted">{r.routine_exercises.length} ejercicios</div></div></div><button className="button small" onClick={onNew}>Empezar</button></div>)}</div></section><section className="card"><h2>Última actividad</h2>{latest ? <div className="workout" onClick={() => onOpen(latest.id)}><h3>{latest.title}</h3><div className="muted">{new Date(latest.date).toLocaleDateString("es-ES")} · {latest.workout_exercises.length} ejercicios</div><p>{Math.round(workoutVolume(latest)).toLocaleString("es-ES")} kg de volumen</p></div> : <p className="muted">Tu primer entrenamiento está esperando.</p>}{measurements.length > 0 && <p className="muted">Última cintura: {measurements.at(-1)?.waist || "—"} cm</p>}</section></div></div> }
+function Stat({ title, value, icon, hint }: { title: string; value: string; icon: string; hint?: string }) { return <div className="card"><div className="row between"><div><div className="muted">{title}</div><div className="big">{value}</div>{hint && <div className="muted" style={{ fontSize: 12 }}>{hint}</div>}</div><span style={{ fontSize: 30 }}>{icon}</span></div></div> }
 
 function Workouts({ workouts, exercises, active, setActive, onNew, onSet, onRemoveSet, onComplete, onDelete, onAddExercise, onRemoveExercise, onUpdateExercise, hasMore, onLoadMore, busy }: {
     workouts: Workout[];
