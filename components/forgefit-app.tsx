@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase, hasSupabaseEnv } from "@/lib/supabase";
 import type { Exercise, Measurement, Routine, Workout, WorkoutSet, MuscleGroup, LoadType } from "@/lib/types";
-import { groupColor, lastExerciseUsage, lastWorkoutOfType, oneRM, repsTemplate, streak, workoutGroup, workoutVolume } from "@/lib/helpers";
+import { buildWorkoutExercises, groupColor, lastExerciseUsage, lastWorkoutForRoutine, oneRM, previousExerciseUsage, repsTemplate, suggestProgression, streak, workoutGroup, workoutVolume } from "@/lib/helpers";
 import { buildWorkbook, parseWorkbook } from "@/lib/io";
 import { Activity, CalendarDays, ChartNoAxesCombined, Dumbbell, LogOut, Plus, Search, Settings, Trash2, UserRound, Check, Download, Upload, Eye, EyeOff } from "lucide-react";
 import * as XLSX from "xlsx";
@@ -13,7 +13,18 @@ type RoutineDraft = { name: string; muscle_group: MuscleGroup; items: { exercise
 const muscles: MuscleGroup[] = ["Pecho", "Espalda", "Pierna", "Hombro", "Bíceps", "Tríceps", "Core", "Glúteo", "Otro"];
 const loads: LoadType[] = ["Barra · peso total", "Mancuernas · cada una", "Máquina/polea · peso seleccionado", "Dominada asistida · kg de asistencia", "Dominada asistida · tipo de goma", "Sin peso · solo repeticiones"];
 const uid = () => crypto.randomUUID(); const today = () => new Date().toISOString().slice(0, 10);
-const WORKOUT_SELECT = "id,date,title,notes,is_completed,workout_exercises(id,name,muscle_group,load_type,order_index,note,uses_bands,workout_sets(id,order_index,repetitions,weight,band_name,band_count,is_completed))";
+const WORKOUT_FIELDS = "id,date,title,notes,is_completed,workout_exercises(id,name,muscle_group,load_type,order_index,note,uses_bands,workout_sets(id,order_index,repetitions,weight,band_name,band_count,is_completed))";
+// Si aún no se ha ejecutado la migración de routine_id en Supabase, seguimos funcionando sin esa columna.
+let routineIdColumn = true;
+const isMissingRoutineId = (error: any) => !!error && /routine_id/i.test(`${error.message} ${error.details ?? ""} ${error.hint ?? ""}`);
+async function fetchWorkouts(query: (select: string) => PromiseLike<{ data: any; error: any }>) {
+    if (routineIdColumn) {
+        const res = await query(`routine_id,${WORKOUT_FIELDS}`);
+        if (!isMissingRoutineId(res.error)) return res;
+        routineIdColumn = false;
+    }
+    return query(WORKOUT_FIELDS);
+}
 const WORKOUTS_PAGE = 25;
 const normalizeWorkouts = (rows: any[]): Workout[] => rows.map((x: Workout) => ({ ...x, workout_exercises: x.workout_exercises.slice().sort((a, b) => a.order_index - b.order_index).map(y => ({ ...y, workout_sets: y.workout_sets.slice().sort((a, b) => a.order_index - b.order_index) })) }));
 const selectAll = (e: React.FocusEvent<HTMLInputElement>) => { const el = e.currentTarget; requestAnimationFrame(() => el.select()); };
@@ -74,16 +85,17 @@ function Main({ session }: { session: any }) {
     async function loadAll() {
         if (!supabase) return;
         setBusy(true);
+        await flushSync();
         await ensureSeed();
         const [e, r, w, m] = await Promise.all([
             supabase.from("exercises").select("id,name,muscle_group,load_type,notes,uses_bands").order("name"),
             supabase.from("routines").select("id,name,muscle_group,routine_exercises(id,order_index,default_weight,default_band_name,default_band_count,exercise:exercises(id,name,muscle_group,load_type,notes,uses_bands))").order("created_at"),
-            supabase.from("workouts").select(WORKOUT_SELECT).order("date", { ascending: false }).limit(workoutLimit),
+            fetchWorkouts(sel => supabase!.from("workouts").select(sel).order("date", { ascending: false }).limit(workoutLimit)),
             supabase.from("body_measurements").select("id,date,waist,chest,relaxed_arm,flexed_arm,thigh,hips,notes").order("date", { ascending: true }),
         ]);
         if (e.data) setExercises(e.data as Exercise[]);
         if (r.data) setRoutines(r.data as any);
-        if (w.data) { setWorkouts(normalizeWorkouts(w.data as any)); setMoreWorkouts((w.data as any).length >= workoutLimit); }
+        if (w.data) { setWorkouts(applyQueue(normalizeWorkouts(w.data as any))); setMoreWorkouts((w.data as any).length >= workoutLimit); }
         if (m.data) setMeasurements(m.data as Measurement[]);
         setBusy(false);
     }
@@ -93,17 +105,51 @@ function Main({ session }: { session: any }) {
         const next = workoutLimit + WORKOUTS_PAGE;
         setBusy(true);
         try {
-            const w = await supabase.from("workouts").select(WORKOUT_SELECT).order("date", { ascending: false }).limit(next);
-            if (w.data) { setWorkouts(normalizeWorkouts(w.data as any)); setMoreWorkouts((w.data as any).length >= next); setWorkoutLimit(next); }
+            const w = await fetchWorkouts(sel => supabase!.from("workouts").select(sel).order("date", { ascending: false }).limit(next));
+            if (w.data) { setWorkouts(applyQueue(normalizeWorkouts(w.data as any))); setMoreWorkouts((w.data as any).length >= next); setWorkoutLimit(next); }
         } finally { setBusy(false) }
     }
     async function ensureSeed() { if (!supabase || !session) return; const { count } = await supabase.from("exercises").select("*", { count: "exact", head: true }); if (!count) await supabase.rpc("seed_forgefit_for_user") }
     function flash(x: string) { setToast(x); setTimeout(() => setToast(""), 2400) }
-    // Peso y repeticiones se escriben mientras el usuario teclea; agrupamos esas escrituras
-    // (debounce) para no mandar una petición a Supabase por cada pulsación.
-    const pendingWrites = useRef<Map<string, { timer: ReturnType<typeof setTimeout>; run: () => void }>>(new Map());
-    function flushPendingWrites() { for (const { timer, run } of pendingWrites.current.values()) { clearTimeout(timer); run() } pendingWrites.current.clear() }
-    useEffect(() => () => flushPendingWrites(), []);
+    // Cola de cambios de series: cada cambio se guarda primero en el dispositivo (localStorage) y después se
+    // envía a Supabase. Si falla (p. ej. sin cobertura en el gimnasio) se reintenta al volver la conexión,
+    // al volver a la app o cada 20 s, así no se pierde ningún peso ni serie. Peso y repeticiones se agrupan
+    // (debounce) para no mandar una petición por cada pulsación.
+    const queueKey = `forgefit-pending-sets-${session?.user?.id ?? "demo"}`;
+    const queue = useRef<Record<string, Partial<WorkoutSet>> | null>(null);
+    const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const syncChain = useRef<Promise<void>>(Promise.resolve());
+    const warnedOffline = useRef(false);
+    const [pendingCount, setPendingCount] = useState(0);
+    function getQueue() { if (!queue.current) { try { queue.current = JSON.parse(localStorage.getItem(queueKey) || "{}") } catch { queue.current = {} } } return queue.current! }
+    function saveQueue() { const q = getQueue(); try { Object.keys(q).length ? localStorage.setItem(queueKey, JSON.stringify(q)) : localStorage.removeItem(queueKey) } catch { } setPendingCount(Object.keys(q).length) }
+    function applyQueue(list: Workout[]) { const q = getQueue(); if (!Object.keys(q).length) return list; return list.map(w => ({ ...w, workout_exercises: w.workout_exercises.map(e => ({ ...e, workout_sets: e.workout_sets.map(s => q[s.id] ? { ...s, ...q[s.id] } : s) })) })) }
+    async function runSync() {
+        if (!supabase || !session) return;
+        const q = getQueue();
+        let offline = false;
+        for (const [setId, patch] of Object.entries(q)) {
+            const { error } = await supabase.from("workout_sets").update(patch).eq("id", setId);
+            // Sin código = error de red: paramos y reintentamos más tarde. Con código = la base de datos lo rechaza: se descarta.
+            if (error && !error.code) { offline = true; break; }
+            if (error) flash(`No se pudo guardar una serie: ${error.message}`);
+            if (q[setId] === patch) delete q[setId];
+        }
+        saveQueue();
+        if (offline && !warnedOffline.current) { warnedOffline.current = true; flash("Sin conexión: tus series se guardan en el móvil y se enviarán al recuperar la cobertura"); }
+        if (!offline && warnedOffline.current) { warnedOffline.current = false; flash("Cambios pendientes guardados ✔"); }
+    }
+    function syncQueue() { syncChain.current = syncChain.current.then(runSync).catch(() => { }); return syncChain.current }
+    function scheduleSync(delay: number) { if (syncTimer.current) clearTimeout(syncTimer.current); syncTimer.current = setTimeout(() => { syncTimer.current = null; syncQueue() }, delay) }
+    function flushSync() { if (syncTimer.current) { clearTimeout(syncTimer.current); syncTimer.current = null } return syncQueue() }
+    useEffect(() => {
+        if (!session) return;
+        queue.current = null; setPendingCount(Object.keys(getQueue()).length);
+        const retry = () => { flushSync() };
+        window.addEventListener("online", retry); document.addEventListener("visibilitychange", retry); window.addEventListener("pagehide", retry);
+        return () => { window.removeEventListener("online", retry); document.removeEventListener("visibilitychange", retry); window.removeEventListener("pagehide", retry); flushSync() };
+    }, [session?.user?.id]);
+    useEffect(() => { if (!pendingCount) return; const t = setInterval(() => syncQueue(), 20000); return () => clearInterval(t) }, [pendingCount > 0]);
     async function persistSet(workoutId: string, exId: string, setId: string, patch: Partial<WorkoutSet>) {
         let isRecord = false, recordMsg = "🏆 ¡Nuevo récord personal!";
         setWorkouts(prev => prev.map(w => {
@@ -134,17 +180,9 @@ function Main({ session }: { session: any }) {
             };
         }));
         if (supabase && session) {
+            const q = getQueue(); q[setId] = { ...q[setId], ...patch }; saveQueue();
             const field = Object.keys(patch)[0];
-            const run = () => { supabase!.from("workout_sets").update(patch).eq("id", setId); };
-            if (field === "weight" || field === "repetitions") {
-                const key = `${setId}:${field}`;
-                const existing = pendingWrites.current.get(key);
-                if (existing) clearTimeout(existing.timer);
-                const timer = setTimeout(() => { run(); pendingWrites.current.delete(key); }, 500);
-                pendingWrites.current.set(key, { timer, run });
-            } else {
-                run();
-            }
+            scheduleSync(field === "weight" || field === "repetitions" ? 500 : 0);
         }
         if (isRecord) flash(recordMsg);
     }
@@ -174,27 +212,33 @@ function Main({ session }: { session: any }) {
         setBusy(true);
         const id = uid();
         const workoutDate = new Date(`${selectedDate}T12:00:00`).toISOString();
-        const source = lastWorkoutOfType(workouts, r.muscle_group);
-        const workout_exercises = source
-            ? source.workout_exercises.slice().sort((a, b) => a.order_index - b.order_index).map((e, i) => ({
-                id: uid(), name: e.name, muscle_group: e.muscle_group, load_type: e.load_type, order_index: i, note: e.note, uses_bands: e.uses_bands,
-                workout_sets: e.workout_sets.slice().sort((a, b) => a.order_index - b.order_index).map((s, j) => ({ id: uid(), order_index: j, repetitions: s.repetitions, weight: s.weight, band_name: s.band_name, band_count: s.band_count, is_completed: false })),
-            }))
-            : r.routine_exercises.slice().sort((a, b) => a.order_index - b.order_index).map((re, i) => ({
-                id: uid(), name: re.exercise.name, muscle_group: re.exercise.muscle_group, load_type: re.exercise.load_type, order_index: i, note: re.exercise.notes || "", uses_bands: re.exercise.uses_bands,
-                workout_sets: repsTemplate.map((reps, j) => ({ id: uid(), order_index: j, repetitions: reps, weight: re.exercise.uses_bands ? 0 : (re.default_weight || 0), band_name: re.default_band_name || "", band_count: re.exercise.uses_bands ? (re.default_band_count || 0) : 0, is_completed: false })),
-            }));
-        const workout: Workout = { id, date: workoutDate, title: r.name, notes: "", is_completed: false, workout_exercises };
+        // Enviamos lo que quede pendiente para no perder los últimos pesos tecleados.
+        await flushSync();
+        let source = lastWorkoutForRoutine(workouts, r, routines, selectedDate);
+        // Si la última sesión de esta rutina no está entre las cargadas, la buscamos en Supabase.
+        if (!source && moreWorkouts && supabase && session) {
+            const until = new Date(`${selectedDate}T23:59:59`).toISOString();
+            const { data } = await fetchWorkouts(sel => {
+                const q = supabase!.from("workouts").select(sel);
+                return (routineIdColumn ? q.or(`routine_id.eq.${r.id},title.ilike.${JSON.stringify(r.name.trim())}`) : q.ilike("title", r.name.trim())).lte("date", until).order("date", { ascending: false }).limit(5);
+            });
+            if (data) source = lastWorkoutForRoutine(normalizeWorkouts(data), r, routines, selectedDate);
+        }
+        const workout_exercises = buildWorkoutExercises(r, source, workouts, selectedDate).map(e => ({ ...e, id: uid(), workout_sets: e.workout_sets.map(s => ({ ...s, id: uid() })) }));
+        const workout: Workout = { id, date: workoutDate, title: r.name, routine_id: r.id, notes: "", is_completed: false, workout_exercises };
         setWorkouts(p => [workout, ...p].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
         setOpenWorkout(id); setTab("entrenos"); setModal(null);
         try {
             if (supabase && session) {
-                await supabase.from("workouts").insert({ id, title: workout.title, date: workout.date, notes: "", is_completed: false, user_id: session.user.id });
-                for (const e of workout.workout_exercises) {
-                    await supabase.from("workout_exercises").insert({ id: e.id, workout_id: id, user_id: session.user.id, name: e.name, muscle_group: e.muscle_group, load_type: e.load_type, order_index: e.order_index, note: e.note, uses_bands: e.uses_bands });
-                    await supabase.from("workout_sets").insert(e.workout_sets.map(s => ({ ...s, workout_exercise_id: e.id, user_id: session.user.id })));
-                }
+                const row: Record<string, unknown> = { id, title: workout.title, date: workout.date, notes: "", is_completed: false, user_id: session.user.id };
+                let { error: wErr } = await supabase.from("workouts").insert(routineIdColumn ? { ...row, routine_id: r.id } : row);
+                if (isMissingRoutineId(wErr)) { routineIdColumn = false; ({ error: wErr } = await supabase.from("workouts").insert(row)); }
+                const { error: eErr } = wErr ? { error: wErr } : workout_exercises.length ? await supabase.from("workout_exercises").insert(workout_exercises.map(e => ({ id: e.id, workout_id: id, user_id: session.user.id, name: e.name, muscle_group: e.muscle_group, load_type: e.load_type, order_index: e.order_index, note: e.note, uses_bands: e.uses_bands }))) : { error: null };
+                const allSets = workout_exercises.flatMap(e => e.workout_sets.map(s => ({ ...s, workout_exercise_id: e.id, user_id: session.user.id })));
+                const { error: sErr } = eErr ? { error: eErr } : allSets.length ? await supabase.from("workout_sets").insert(allSets) : { error: null };
+                if (sErr) { flash(`No se pudo crear la sesión: ${sErr.message}`); await loadAll(); return; }
             }
+            flash(source ? `Sesión creada con los datos del ${new Date(source.date).toLocaleDateString("es-ES")}` : "Sesión creada desde la rutina");
         } finally { setBusy(false) }
     }
     async function addBlankWorkout(title: string, selectedDate: string) {
@@ -244,7 +288,7 @@ function Main({ session }: { session: any }) {
             setEditRoutine(null); flash("Rutina actualizada");
         } finally { setBusy(false) }
     }
-    async function completeWorkout(id: string) { flushPendingWrites(); setBusy(true); setWorkouts(p => p.map(w => w.id === id ? { ...w, is_completed: true } : w)); try { if (supabase && session) await supabase.from("workouts").update({ is_completed: true }).eq("id", id); flash("Entrenamiento completado ✨") } finally { setBusy(false) } }
+    async function completeWorkout(id: string) { setBusy(true); await flushSync(); setWorkouts(p => p.map(w => w.id === id ? { ...w, is_completed: true } : w)); try { if (supabase && session) await supabase.from("workouts").update({ is_completed: true }).eq("id", id); flash("Entrenamiento completado ✨") } finally { setBusy(false) } }
     async function deleteWorkout(id: string) { if (!confirm("¿Eliminar este entrenamiento?")) return; setBusy(true); setWorkouts(p => p.filter(w => w.id !== id)); setOpenWorkout(null); try { if (supabase && session) await supabase.from("workouts").delete().eq("id", id) } finally { setBusy(false) } }
     async function addExerciseToWorkout(workoutId: string, exercise: Exercise) {
         const workout = workouts.find(w => w.id === workoutId);
@@ -253,7 +297,7 @@ function Main({ session }: { session: any }) {
         setBusy(true);
         try {
 
-        const lastUsage = lastExerciseUsage(workouts, exercise.name);
+        const lastUsage = previousExerciseUsage(workouts, exercise.name, workoutId, workout.date);
         const workoutExercise = {
             id: uid(),
             name: exercise.name,
@@ -506,7 +550,7 @@ function Main({ session }: { session: any }) {
         } finally { setBusy(false) }
     }
     const nav: [Tab, string, any][] =[["inicio", "Inicio", Activity], ["entrenos", "Entrenos", Dumbbell], ["calendario", "Calendario", CalendarDays], ["ejercicios", "Ejercicios", Search], ["progreso", "Progreso", ChartNoAxesCombined], ["medidas", "Medidas", UserRound], ["ajustes", "Ajustes", Settings]];
-    return <div className="shell">{toast && <div className="toast">{toast}</div>}<header className="topbar"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">{session?.user?.email || "Modo demostración local"}</span></div></div>{busy && <span className="muted row" style={{ gap: 8 }}><Spinner size={14} /> Sincronizando…</span>}</header><nav className="nav">{nav.map(([id, label, Icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><Icon size={16} /> <span className="hideMobile">{label}</span></button>)}</nav><main style={{ marginTop: 18 }}>{tab === "inicio" && <Dashboard workouts={workouts} routines={routines} measurements={measurements} onNew={() => setModal("workout")} onOpen={id => { setOpenWorkout(id); setTab("entrenos") }} />}{tab === "entrenos" && <Workouts workouts={workouts} exercises={exercises} active={openWorkout} setActive={setOpenWorkout} onNew={() => setModal("workout")} onSet={persistSet} onRemoveSet={removeSet} onComplete={completeWorkout} onDelete={deleteWorkout} onAddExercise={addExerciseToWorkout} onRemoveExercise={removeExerciseFromWorkout} onUpdateExercise={updateWorkoutExercise} hasMore={moreWorkouts} onLoadMore={loadMoreWorkouts} busy={busy} />} {tab === "calendario" && <Calendar workouts={workouts} />} {tab === "ejercicios" && <Exercises exercises={exercises} workouts={workouts} onNew={() => setModal("exercise")} onEdit={setEditExercise} />} {tab === "progreso" && <Progress workouts={workouts} />} {tab === "medidas" && <Measurements data={measurements} onNew={() => setModal("measurement")} />} {tab === "ajustes" && <SettingsView workouts={workouts} exercises={exercises} routines={routines} measurements={measurements} session={session} onImport={importExcel} busy={busy} />}</main>{modal === "workout" && <RoutineModal routines={routines} workouts={workouts} close={() => setModal(null)} choose={addWorkout} onBlank={addBlankWorkout} onCreateRoutine={() => setModal("routine")} onEditRoutine={r => { setModal(null); setEditRoutine(r); }} busy={busy} />} {modal === "exercise" && <ExerciseModal close={() => setModal(null)} save={addExercise} busy={busy} />} {modal === "measurement" && <MeasurementModal close={() => setModal(null)} save={addMeasurement} busy={busy} />}{modal === "routine" && <RoutineFormModal exercises={exercises} close={() => setModal(null)} save={addRoutine} busy={busy} />}{editRoutine && <RoutineFormModal exercises={exercises} close={() => setEditRoutine(null)} save={data => updateRoutine(editRoutine.id, data)} busy={busy} initial={editRoutine} />}{editExercise && <ExerciseModal close={() => setEditExercise(null)} save={data => updateExercise(editExercise.id, data)} busy={busy} initial={editExercise} />}</div>
+    return <div className="shell">{toast && <div className="toast">{toast}</div>}<header className="topbar"><div className="brand"><div className="logo"><img src="/icon.jpeg" alt="ForgeFit" /></div><div><h1>ForgeFit</h1><span className="muted">{session?.user?.email || "Modo demostración local"}</span></div></div><div className="row" style={{ gap: 8 }}>{pendingCount > 0 && <button className="badge" style={{ border: 0, cursor: "pointer" }} title="Cambios guardados en el dispositivo pendientes de enviar. Pulsa para reintentar." onClick={() => flushSync()}>⏳ {pendingCount} sin enviar</button>}{busy && <span className="muted row" style={{ gap: 8 }}><Spinner size={14} /> Sincronizando…</span>}</div></header><nav className="nav">{nav.map(([id, label, Icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><Icon size={16} /> <span className="hideMobile">{label}</span></button>)}</nav><main style={{ marginTop: 18 }}>{tab === "inicio" && <Dashboard workouts={workouts} routines={routines} measurements={measurements} onNew={() => setModal("workout")} onOpen={id => { setOpenWorkout(id); setTab("entrenos") }} />}{tab === "entrenos" && <Workouts workouts={workouts} exercises={exercises} active={openWorkout} setActive={setOpenWorkout} onNew={() => setModal("workout")} onSet={persistSet} onRemoveSet={removeSet} onComplete={completeWorkout} onDelete={deleteWorkout} onAddExercise={addExerciseToWorkout} onRemoveExercise={removeExerciseFromWorkout} onUpdateExercise={updateWorkoutExercise} hasMore={moreWorkouts} onLoadMore={loadMoreWorkouts} busy={busy} />} {tab === "calendario" && <Calendar workouts={workouts} />} {tab === "ejercicios" && <Exercises exercises={exercises} workouts={workouts} onNew={() => setModal("exercise")} onEdit={setEditExercise} />} {tab === "progreso" && <Progress workouts={workouts} />} {tab === "medidas" && <Measurements data={measurements} onNew={() => setModal("measurement")} />} {tab === "ajustes" && <SettingsView workouts={workouts} exercises={exercises} routines={routines} measurements={measurements} session={session} onImport={importExcel} busy={busy} />}</main>{modal === "workout" && <RoutineModal routines={routines} workouts={workouts} close={() => setModal(null)} choose={addWorkout} onBlank={addBlankWorkout} onCreateRoutine={() => setModal("routine")} onEditRoutine={r => { setModal(null); setEditRoutine(r); }} busy={busy} />} {modal === "exercise" && <ExerciseModal close={() => setModal(null)} save={addExercise} busy={busy} />} {modal === "measurement" && <MeasurementModal close={() => setModal(null)} save={addMeasurement} busy={busy} />}{modal === "routine" && <RoutineFormModal exercises={exercises} close={() => setModal(null)} save={addRoutine} busy={busy} />}{editRoutine && <RoutineFormModal exercises={exercises} close={() => setEditRoutine(null)} save={data => updateRoutine(editRoutine.id, data)} busy={busy} initial={editRoutine} />}{editExercise && <ExerciseModal close={() => setEditExercise(null)} save={data => updateExercise(editExercise.id, data)} busy={busy} initial={editExercise} />}</div>
 }
 
 function mondayOf(d: Date) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
@@ -613,7 +657,12 @@ function WorkoutDetail({
 
             {w.workout_exercises.length === 0 && <div className="card muted">Esta sesión todavía no tiene ejercicios.</div>}
 
-            {w.workout_exercises.map(ex => (
+            {w.workout_exercises.map(ex => {
+                const prev = previousExerciseUsage(workouts, ex.name, w.id, w.date);
+                const prevDate = prev && workouts.find(x => x.workout_exercises.includes(prev))?.date;
+                const prog = w.is_completed ? null : suggestProgression(prev, ex);
+                const applyProgression = () => { if (!prog) return; for (const s of ex.workout_sets) { if (s.is_completed) continue; onSet(w.id, ex.id, s.id, prog.kind === "bands" ? { band_count: Math.max(0, s.band_count + prog.delta) } : { weight: Math.max(0, Math.round((s.weight + prog.delta) * 100) / 100) }); } };
+                return (
                 <div className="card" key={ex.id}>
                     <div className="row between exerciseHeader" style={{ borderColor: groupColor[ex.muscle_group] }}>
                         <div><h3>{ex.name}</h3><div className="muted">{ex.muscle_group} · {ex.load_type}</div></div>
@@ -623,6 +672,11 @@ function WorkoutDetail({
                             {!w.is_completed && <button className="button danger small" aria-label="Eliminar ejercicio" disabled={busy} onClick={() => onRemoveExercise(ex.id)}><Trash2 size={15} /></button>}
                         </div>
                     </div>
+
+                    {prev && <div className="row between wrap" style={{ marginTop: 10, gap: 8 }}>
+                        <span className="muted" style={{ fontSize: 13 }}>Última vez{prevDate ? ` (${new Date(prevDate).toLocaleDateString("es-ES")})` : ""}: {prev.workout_sets.map(s => `${s.repetitions}×${ex.uses_bands ? `${s.band_count}g` : `${s.weight}kg`}${s.is_completed ? "" : "?"}`).join(" · ")}</span>
+                        {prog && <button className="button secondary small" disabled={busy} title="Completaste todas las series la última vez" onClick={applyProgression}>💡 {prog.label}</button>}
+                    </div>}
 
                     <textarea className="field" style={{ margin: "12px 0" }} value={ex.note} readOnly placeholder="Notas del ejercicio" />
 
@@ -638,7 +692,8 @@ function WorkoutDetail({
                         ))}
                     </div>
                 </div>
-            ))}
+                );
+            })}
 
             {showExerciseSelector && <WorkoutExerciseModal exercises={exercises} workout={w} workouts={workouts} close={() => setShowExerciseSelector(false)} choose={exercise => { onAddExercise(exercise); setShowExerciseSelector(false); }} />}
             {editingExercise && <EditWorkoutExerciseModal exercise={editingExercise} close={() => setEditingExerciseId(null)} save={patch => { onUpdateExercise(editingExercise.id, patch); setEditingExerciseId(null); }} />}
@@ -704,7 +759,7 @@ function SettingsView({ workouts, exercises, routines, measurements, session, on
             // En la lista solo hay 25 entrenos cargados; para el Excel traemos el historial completo.
             let allWorkouts = workouts;
             if (supabase && session) {
-                const { data, error } = await supabase.from("workouts").select(WORKOUT_SELECT).order("date", { ascending: false });
+                const { data, error } = await fetchWorkouts(sel => supabase!.from("workouts").select(sel).order("date", { ascending: false }));
                 if (error) throw error;
                 if (data) allWorkouts = normalizeWorkouts(data as any);
             }
@@ -728,8 +783,8 @@ function RoutineModal({ routines, workouts, close, choose, onBlank, onCreateRout
     return <Modal close={close}><h2>Empezar entrenamiento</h2><div className="stack">
         <div><label className="label">Fecha del entrenamiento</label><input className="field" type="date" max={today()} value={date} onChange={e => setDate(e.target.value)} /></div>
         {routines.map(r => {
-            const last = lastWorkoutOfType(workouts, r.muscle_group);
-            return <div className="card workout" key={r.id}><div className="row between wrap"><div className="exerciseHeader" style={{ borderColor: groupColor[r.muscle_group] }}><h3>{r.name}</h3><span className="muted">{last ? `Basado en tu última sesión (${new Date(last.date).toLocaleDateString("es-ES")}) · ${last.workout_exercises.length} ejercicios` : `${r.routine_exercises.length} ejercicios · 4 series por ejercicio`}</span></div><div className="row"><button className="button secondary small" disabled={busy} onClick={() => onEditRoutine(r)}>Editar</button><button className="button small" disabled={!date || busy} onClick={() => choose(r, date)}>Empezar</button></div></div></div>;
+            const last = lastWorkoutForRoutine(workouts, r, routines, date);
+            return <div className="card workout" key={r.id}><div className="row between wrap"><div className="exerciseHeader" style={{ borderColor: groupColor[r.muscle_group] }}><h3>{r.name}</h3><span className="muted">{last ? `Basado en tu última sesión (${new Date(last.date).toLocaleDateString("es-ES")}) · ${buildWorkoutExercises(r, last, workouts, date).length} ejercicios` : `${r.routine_exercises.length} ejercicios · 4 series por ejercicio`}</span></div><div className="row"><button className="button secondary small" disabled={busy} onClick={() => onEditRoutine(r)}>Editar</button><button className="button small" disabled={!date || busy} onClick={() => choose(r, date)}>Empezar</button></div></div></div>;
         })}
         <button className="button secondary" disabled={busy} onClick={onCreateRoutine}><Plus size={16} /> Crear rutina</button>
         <div className="card stack"><label className="label">Entreno libre (sin rutina)</label><input className="field" placeholder="Nombre del entreno (p. ej. Full body)" value={blankTitle} onChange={e => setBlankTitle(e.target.value)} /><button className="button secondary" disabled={!date || busy} onClick={() => onBlank(blankTitle, date)}>Empezar entreno libre</button></div>

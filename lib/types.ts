@@ -5,5 +5,5 @@ export interface RoutineExercise {id:string;order_index:number;default_weight:nu
 export interface Routine {id:string;name:string;muscle_group:MuscleGroup;routine_exercises:RoutineExercise[]}
 export interface WorkoutSet {id:string;order_index:number;repetitions:number;weight:number;band_name:string;band_count:number;is_completed:boolean}
 export interface WorkoutExercise {id:string;name:string;muscle_group:MuscleGroup;load_type:LoadType;order_index:number;note:string;uses_bands:boolean;workout_sets:WorkoutSet[]}
-export interface Workout {id:string;date:string;title:string;notes:string;is_completed:boolean;workout_exercises:WorkoutExercise[]}
+export interface Workout {id:string;date:string;title:string;routine_id?:string|null;notes:string;is_completed:boolean;workout_exercises:WorkoutExercise[]}
 export interface Measurement {id:string;date:string;waist:number;chest:number;relaxed_arm:number;flexed_arm:number;thigh:number;hips:number;notes:string}

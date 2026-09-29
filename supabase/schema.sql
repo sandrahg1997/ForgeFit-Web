@@ -12,6 +12,11 @@ alter table public.exercises add column if not exists uses_bands boolean not nul
 alter table public.routine_exercises add column if not exists default_band_count numeric not null default 0;
 alter table public.workout_exercises add column if not exists uses_bands boolean not null default false;
 alter table public.workout_sets add column if not exists band_count numeric not null default 0;
+-- Relación sesión → rutina (para no depender del título si se renombra la rutina).
+alter table public.workouts add column if not exists routine_id uuid references public.routines(id) on delete set null;
+create index if not exists workouts_routine_date_idx on public.workouts(routine_id, date desc);
+-- Backfill: enlaza las sesiones existentes con la rutina del mismo nombre.
+update public.workouts w set routine_id = r.id from public.routines r where w.routine_id is null and r.user_id = w.user_id and lower(trim(r.name)) = lower(trim(w.title));
 -- Backfill: marca como "usa gomas" los ejercicios/ejercicios-de-entreno ya creados con ese tipo de carga.
 update public.exercises set uses_bands = true where load_type = 'Dominada asistida · tipo de goma' and uses_bands = false;
 update public.workout_exercises set uses_bands = true where load_type = 'Dominada asistida · tipo de goma' and uses_bands = false;
